@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: medexam-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: medexam
+      MYSQL_USER: medexam
+      MYSQL_PASSWORD: medexam
+      TZ: Asia/Tehran
+    ports:
+      - "3306:3306"
+    volumes:
+      # MySQL executes any *.sql inside this folder on first init
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: medexam-phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      TZ: Asia/Tehran
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
