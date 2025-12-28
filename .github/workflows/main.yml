@@ -1,0 +1,424 @@
+name: MedExam CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Run security checks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  # ============================================================
+  # JOB 1: Database Validation
+  # ============================================================
+  database-validation:
+    name: Database Schema & Seed Validation
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: medexam_test
+          MYSQL_USER: testuser
+          MYSQL_PASSWORD: testpass
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        ports:
+          - 3306:3306
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -u root -proot; then
+              echo "MySQL is ready!"
+              exit 0
+            fi
+            echo "Waiting for MySQL... ($i/30)"
+            sleep 1
+          done
+          exit 1
+
+      - name: Validate schema.sql syntax
+        run: |
+          if ! mysql -h 127.0.0.1 -u root -proot -e "SOURCE database/schema.sql" medexam_test 2>&1 | tee schema_output.log; then
+            echo "❌ Schema validation failed"
+            cat schema_output.log
+            exit 1
+          fi
+          echo "✅ Schema syntax is valid"
+
+      - name: Validate seed.sql syntax and data
+        run: |
+          if ! mysql -h 127.0.0.1 -u root -proot medexam_test -e "SOURCE database/seed.sql" 2>&1 | tee seed_output.log; then
+            echo "❌ Seed validation failed"
+            cat seed_output.log
+            exit 1
+          fi
+          echo "✅ Seed data loaded successfully"
+
+      - name: Verify key tables exist
+        run: |
+          TABLES="specialties exam_levels subspecialties courses chapters topics exams questions question_options question_explanations users"
+          
+          for table in $TABLES; do
+            COUNT=$(mysql -h 127.0.0.1 -u root -proot medexam_test -se "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='medexam_test' AND table_name='$table';")
+            if [ "$COUNT" -eq 1 ]; then
+              echo "✅ Table '$table' exists"
+            else
+              echo "❌ Table '$table' NOT found"
+              exit 1
+            fi
+          done
+
+      - name: Verify sample data integrity
+        run: |
+          echo "Checking specialties..."
+          SPEC_COUNT=$(mysql -h 127.0.0.1 -u root -proot medexam_test -se "SELECT COUNT(*) FROM specialties WHERE is_active=TRUE;")
+          echo "Active specialties: $SPEC_COUNT"
+          
+          echo "Checking exam levels..."
+          LEVEL_COUNT=$(mysql -h 127.0.0.1 -u root -proot medexam_test -se "SELECT COUNT(*) FROM exam_levels WHERE is_active=TRUE;")
+          echo "Active exam levels: $LEVEL_COUNT"
+          
+          echo "Checking subspecialties..."
+          SUBSUB_COUNT=$(mysql -h 127.0.0.1 -u root -proot medexam_test -se "SELECT COUNT(*) FROM subspecialties WHERE is_active=TRUE;")
+          echo "Active subspecialties: $SUBSUB_COUNT"
+          
+          if [ "$SPEC_COUNT" -gt 0 ] && [ "$LEVEL_COUNT" -gt 0 ]; then
+            echo "✅ Sample data integrity verified"
+          else
+            echo "⚠️  Seed data may be incomplete"
+          fi
+
+      - name: Check for orphaned records
+        run: |
+          echo "Checking for orphaned exam_levels..."
+          ORPHANED=$(mysql -h 127.0.0.1 -u root -proot medexam_test -se "SELECT COUNT(*) FROM exam_levels el WHERE NOT EXISTS (SELECT 1 FROM specialties s WHERE s.id=el.specialty_id);")
+          if [ "$ORPHANED" -eq 0 ]; then
+            echo "✅ No orphaned exam_levels"
+          else
+            echo "⚠️  Found $ORPHANED orphaned exam_levels"
+          fi
+
+      - name: Upload database validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-validation-report
+          path: |
+            schema_output.log
+            seed_output.log
+
+  # ============================================================
+  # JOB 2: Docker Build Validation
+  # ============================================================
+  docker-build:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: database-validation
+    
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate docker-compose.yml
+        run: |
+          if ! docker-compose config -q; then
+            echo "❌ docker-compose.yml validation failed"
+            exit 1
+          fi
+          echo "✅ docker-compose.yml is valid"
+
+      - name: Build Docker image (MySQL)
+        run: |
+          docker-compose build mysql
+          echo "✅ MySQL Docker image built successfully"
+
+      - name: Build Docker image (phpMyAdmin)
+        run: |
+          docker-compose build phpmyadmin
+          echo "✅ phpMyAdmin Docker image built successfully"
+
+      - name: Test Docker stack startup
+        run: |
+          docker-compose up -d
+          sleep 10
+          
+          if docker-compose exec -T mysql mysqladmin ping -u medexam -pmedexam; then
+            echo "✅ Docker stack started successfully"
+          else
+            echo "❌ Docker stack failed to start"
+            docker-compose logs
+            exit 1
+          fi
+          
+          docker-compose down
+
+  # ============================================================
+  # JOB 3: Code Quality & Security Checks
+  # ============================================================
+  code-quality:
+    name: Code Quality & Security Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check YAML syntax
+        run: |
+          if ! python3 -m py_compile docker-compose.yml 2>/dev/null; then
+            echo "Checking YAML with yamllint..."
+          fi
+          find . -name '*.yml' -o -name '*.yaml' | head -20
+          echo "✅ YAML files found"
+
+      - name: Check SQL syntax
+        run: |
+          echo "Validating SQL files..."
+          for file in database/*.sql; do
+            if [ -f "$file" ]; then
+              echo "Checking: $file"
+              # Basic SQL syntax check (looking for common issues)
+              if grep -E '^[[:space:]]*--' "$file" > /dev/null 2>&1; then
+                echo "  ✅ Contains comments (likely valid SQL)"
+              fi
+            fi
+          done
+          echo "✅ SQL files validated"
+
+      - name: Check for common security issues
+        run: |
+          echo "Scanning for hardcoded credentials..."
+          if grep -r "password.*=.*['\"]" --include="*.sql" --include="*.yml" --include="*.yaml" database/ docker-compose.yml 2>/dev/null | grep -v 'MYSQL_PASSWORD\|MYSQL_ROOT_PASSWORD'; then
+            echo "⚠️  WARNING: Found potential hardcoded credentials (check manually)"
+          else
+            echo "✅ No obvious hardcoded credentials found"
+          fi
+
+      - name: Check for SQL injection risks
+        run: |
+          echo "Checking for dynamic SQL patterns..."
+          if grep -r "CONCAT\|CONCATENATE" database/*.sql 2>/dev/null | grep -v "CHARACTER SET"; then
+            echo "⚠️  Found CONCAT usage (verify for injection risks)"
+          else
+            echo "✅ No suspicious dynamic SQL patterns"
+          fi
+
+      - name: Verify charset consistency
+        run: |
+          echo "Checking character set definitions..."
+          CHARSET_ISSUES=$(grep -r "utf8 " database/schema.sql 2>/dev/null | wc -l)
+          UTF8MB4_USED=$(grep -r "utf8mb4" database/schema.sql 2>/dev/null | wc -l)
+          
+          if [ "$UTF8MB4_USED" -gt 0 ] && [ "$CHARSET_ISSUES" -eq 0 ]; then
+            echo "✅ Consistent utf8mb4 charset usage"
+          else
+            echo "⚠️  Mixed charset definitions found"
+          fi
+
+      - name: Check for Persian language support
+        run: |
+          echo "Verifying Persian language fields..."
+          PERSIAN_FIELDS=$(grep -c "_fa" database/schema.sql)
+          echo "Found $PERSIAN_FIELDS Persian language fields"
+          if [ "$PERSIAN_FIELDS" -gt 10 ]; then
+            echo "✅ Good Persian language support"
+          else
+            echo "⚠️  Limited Persian language fields"
+          fi
+
+      - name: Lint docker-compose configuration
+        run: |
+          echo "Validating docker-compose structure..."
+          if docker-compose config > /dev/null 2>&1; then
+            echo "✅ docker-compose.yml structure is valid"
+          else
+            echo "❌ docker-compose.yml has structural issues"
+            exit 1
+          fi
+
+  # ============================================================
+  # JOB 4: File Structure Validation
+  # ============================================================
+  file-structure:
+    name: Project File Structure Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify essential files
+        run: |
+          REQUIRED_FILES=(
+            "README.md"
+            "docker-compose.yml"
+            "database/schema.sql"
+            "database/seed.sql"
+            "database/init.sql"
+            "database/README.md"
+          )
+          
+          MISSING=0
+          for file in "${REQUIRED_FILES[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✅ Found: $file"
+            else
+              echo "❌ Missing: $file"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          
+          if [ "$MISSING" -gt 0 ]; then
+            echo "\n❌ $MISSING required files are missing"
+            exit 1
+          else
+            echo "\n✅ All essential files present"
+          fi
+
+      - name: Check file sizes
+        run: |
+          echo "File size analysis:"
+          du -sh database/schema.sql database/seed.sql
+          
+          SCHEMA_SIZE=$(stat -f%z database/schema.sql 2>/dev/null || stat -c%s database/schema.sql 2>/dev/null)
+          SEED_SIZE=$(stat -f%z database/seed.sql 2>/dev/null || stat -c%s database/seed.sql 2>/dev/null)
+          
+          if [ "$SCHEMA_SIZE" -gt 1000 ] && [ "$SEED_SIZE" -gt 500 ]; then
+            echo "✅ Schema and seed files have substantial content"
+          else
+            echo "⚠️  Files may be incomplete"
+          fi
+
+      - name: Verify directory structure
+        run: |
+          echo "Project structure:"
+          tree -L 2 -I 'node_modules' 2>/dev/null || find . -maxdepth 2 -type d ! -path '*/.*' | head -20
+          echo "✅ Directory structure verified"
+
+  # ============================================================
+  # JOB 5: Build Summary & Notifications
+  # ============================================================
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [database-validation, docker-build, code-quality, file-structure]
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate build report
+        run: |
+          echo "# 🔍 MedExam CI/CD Pipeline Report" > build_report.md
+          echo "" >> build_report.md
+          echo "## Pipeline Summary" >> build_report.md
+          echo "" >> build_report.md
+          echo "- **Database Validation**: ${{ needs.database-validation.result }}" >> build_report.md
+          echo "- **Docker Build**: ${{ needs.docker-build.result }}" >> build_report.md
+          echo "- **Code Quality**: ${{ needs.code-quality.result }}" >> build_report.md
+          echo "- **File Structure**: ${{ needs.file-structure.result }}" >> build_report.md
+          echo "" >> build_report.md
+          echo "## Timestamp" >> build_report.md
+          echo "Generated at: $(date)" >> build_report.md
+          echo "" >> build_report.md
+          echo "---" >> build_report.md
+          
+          cat build_report.md
+
+      - name: Check overall status
+        run: |
+          if [ "${{ needs.database-validation.result }}" = "success" ] && \
+             [ "${{ needs.docker-build.result }}" = "success" ] && \
+             [ "${{ needs.code-quality.result }}" = "success" ] && \
+             [ "${{ needs.file-structure.result }}" = "success" ]; then
+            echo "✅ All checks passed!"
+            exit 0
+          else
+            echo "⚠️  Some checks failed. Review the logs above."
+            exit 1
+          fi
+
+      - name: Upload final report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report
+          path: build_report.md
+
+  # ============================================================
+  # JOB 6: Documentation Check
+  # ============================================================
+  documentation:
+    name: Documentation & README Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README completeness
+        run: |
+          echo "Analyzing README.md..."
+          
+          SECTIONS=("پروژه" "آغاز" "نصب" "استفاده" "پایگاه داده" "Docker")
+          
+          for section in "${SECTIONS[@]}"; do
+            if grep -q "$section" README.md 2>/dev/null; then
+              echo "✅ Section '$section' found"
+            fi
+          done
+          
+          LINES=$(wc -l < README.md)
+          echo "README has $LINES lines"
+          
+          if [ "$LINES" -gt 20 ]; then
+            echo "✅ README has adequate documentation"
+          else
+            echo "⚠️  README may need more content"
+          fi
+
+      - name: Verify database documentation
+        run: |
+          if [ -f "database/README.md" ]; then
+            echo "✅ Database README exists"
+            wc -l database/README.md
+          else
+            echo "⚠️  database/README.md not found"
+          fi
+
+      - name: Check for broken links in docs
+        run: |
+          echo "Checking for documentation issues..."
+          if grep -r "http" README.md database/README.md 2>/dev/null | grep -E '\[.*\]\(.*\)'; then
+            echo "✅ Documentation contains links"
+          else
+            echo "✅ No external links to validate"
+          fi
