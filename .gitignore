@@ -1,0 +1,52 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Database backups
+*.sql.bak
+*.sql.gz
+database/backups/
+
+# Node (if using)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python (if using)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# MySQL
+*.ibd
+*.MYD
+*.MYI
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Temp files
+*.tmp
+*.temp
+.tmp/

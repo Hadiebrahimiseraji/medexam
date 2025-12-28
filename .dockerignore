@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.local
+node_modules
+__pycache__
+*.log
+.DS_Store
+.vscode
+.idea
+*.swp
+README.md
+LICENSE
