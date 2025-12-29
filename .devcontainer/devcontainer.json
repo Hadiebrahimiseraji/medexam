@@ -5,13 +5,10 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "nodeVersion": "18"
-    },
-    "ghcr.io/devcontainers/features/mysql:1": {
-      "version": "8.0"
     }
   },
 
-  "forwardPorts": [5000, 5173, 3306],
+  "forwardPorts": [5000, 5173],
   
   "portsAttributes": {
     "5000": {
@@ -23,11 +20,6 @@
       "label": "Frontend",
       "onAutoForward": "notify",
       "visibility": "public"
-    },
-    "3306": {
-      "label": "MySQL Database",
-      "onAutoForward": "silent",
-      "visibility": "private"
     }
   },
 
@@ -38,11 +30,6 @@
       "extensions": [
         "dbaeumer.vscode-eslint",
         "esbenp.prettier-vscode",
-        "ms-vscode.vscode-mysql",
-        "Dunn.diff",
-        "ms-vscode-remote.vscode-remote-extensionpack",
-        "GitHub.copilot",
-        "GitHub.copilot-chat",
         "formulahendry.auto-rename-tag",
         "bradlc.vscode-tailwindcss",
         "PKief.material-icon-theme",
@@ -52,9 +39,7 @@
         "editor.defaultFormatter": "esbenp.prettier-vscode",
         "editor.formatOnSave": true,
         "editor.fontSize": 14,
-        "editor.fontFamily": "Fira Code",
         "editor.bracketPairColorization.enabled": true,
-        "editor.guides.bracketPairs": true,
         "[javascript]": {
           "editor.defaultFormatter": "esbenp.prettier-vscode"
         },
@@ -64,21 +49,15 @@
         "[json]": {
           "editor.defaultFormatter": "esbenp.prettier-vscode"
         },
-        "[html]": {
-          "editor.defaultFormatter": "esbenp.prettier-vscode"
-        },
         "prettier.semi": true,
         "prettier.singleQuote": true,
         "prettier.trailingComma": "es5",
-        "git.ignoreLimitWarning": true,
-        "extensions.autoUpdate": true
+        "git.ignoreLimitWarning": true
       }
     }
   },
 
   "remoteUser": "codespace",
-  
-  "initializeCommand": "echo '🚀 Initializing Codespace environment...'",
   
   "onCreateCommand": "npm install -g npm@latest"
 }
